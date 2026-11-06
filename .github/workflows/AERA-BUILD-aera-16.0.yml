@@ -1,6 +1,12 @@
 name: AERA Builder
 
 on:
+  push:
+    branches:
+      - "aera-16.0"
+    paths:
+      - ".github/workflows/AERA-BUILD-aera-16.0.yml"
+
   workflow_dispatch:
     inputs:
       MANIFEST_BRANCH:
@@ -69,6 +75,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch'
     name: Build ${{ inputs.LUNCH_PRODUCT }} (${{ inputs.MANIFEST_BRANCH }})
     runs-on: ubuntu-24.04
     timeout-minutes: 360
