@@ -58,7 +58,7 @@ on:
         description: Swap size in GB (0 to disable)
         required: true
         type: string
-        default: "16"
+        default: "30"
       PUBLISH_RELEASE:
         description: Publish a GitHub release (otherwise upload a workflow artifact)
         required: true
@@ -128,8 +128,17 @@ jobs:
               small="$RUNNER_WORKSPACE"
             fi
           fi
+
           swap_fs="$small"
           [ "$(free_gb "$swap_fs")" -ge $((SWAP_SIZE_GB + 2)) ] || swap_fs="$big"
+
+          if [ "$SWAP_SIZE_GB" -gt 0 ]; then
+            if [ "$(free_gb "$swap_fs")" -lt $((SWAP_SIZE_GB + 2)) ]; then
+              echo "::error::Insufficient disk space for ${SWAP_SIZE_GB}GB swap."
+              df -h "$big" "$swap_fs"
+              exit 1
+            fi
+          fi
 
           sudo install -d -o "$(id -u)" -g "$(id -g)" "$big/aera"
           echo "SRC_DIR=$big/aera" >> "$GITHUB_ENV"
@@ -211,7 +220,37 @@ jobs:
             echo "DT_SHA=$(git -C "$DEVICE_PATH" rev-parse HEAD)"
           } >> "$GITHUB_ENV"
 
-      - name: Build AERA Recovery 
+      - name: Show system resources before build
+        run: |
+          set -euo pipefail
+
+          echo "========== PRE-BUILD RESOURCE DIAGNOSTICS =========="
+
+          echo "CPU cores available:"
+          nproc
+
+          echo "CPU cores installed:"
+          nproc --all
+
+          echo "Memory:"
+          free -h
+
+          echo "Swap:"
+          swapon --show
+
+          echo "Disk:"
+          df -h
+
+          echo "Cgroup memory events:"
+          if [ -f /sys/fs/cgroup/memory.events ]; then
+            cat /sys/fs/cgroup/memory.events
+          else
+            echo "memory.events unavailable"
+          fi
+
+          echo "===================================================="
+
+      - name: Build AERA Recovery
         run: |
           set -o pipefail
           export PATH="$HOME/bin:$PATH"
@@ -230,8 +269,52 @@ jobs:
 
           touch "$RUNNER_TEMP/build.start"
           t0=$(date +%s)
-          mka adbd "$BUILD_TARGET" 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+          JOBS="$(nproc --all)"
+          echo "Using $JOBS parallel build jobs."
+
+          mka adbd "$BUILD_TARGET" -j"$JOBS" 2>&1 | tee "$RUNNER_TEMP/build.log"
+
           echo "BUILD_SECONDS=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"
+
+      - name: Show system resources after build
+        if: always()
+        run: |
+          echo "========== POST-BUILD RESOURCE DIAGNOSTICS =========="
+
+          echo "CPU cores available:"
+          nproc
+
+          echo "CPU cores installed:"
+          nproc --all
+
+          echo "Memory:"
+          free -h
+
+          echo "Swap:"
+          swapon --show
+
+          echo "Disk:"
+          df -h
+
+          echo "Cgroup memory events:"
+          if [ -f /sys/fs/cgroup/memory.events ]; then
+            cat /sys/fs/cgroup/memory.events
+          else
+            echo "memory.events unavailable"
+          fi
+
+          echo "Cgroup memory peak:"
+          if [ -f /sys/fs/cgroup/memory.peak ]; then
+            cat /sys/fs/cgroup/memory.peak
+          else
+            echo "memory.peak unavailable"
+          fi
+
+          echo "Kernel OOM messages:"
+          sudo dmesg -T 2>/dev/null | grep -iE 'oom|out of memory|killed process' | tail -30 || true
+
+          echo "====================================================="
 
       - name: Collect outputs and release notes
         run: |
