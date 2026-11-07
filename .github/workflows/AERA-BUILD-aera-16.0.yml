@@ -208,7 +208,7 @@ jobs:
             echo "SYNC_SECONDS=$(( $(date +%s) - t0 ))"
             echo "MANIFEST_SHA=$(git -C .repo/manifests rev-parse --short=10 HEAD)"
             echo "RECOVERY_SHA=$(git -C bootable/recovery rev-parse --short=10 HEAD)"
-            echo "AERA_VERSION=${version:-unknown}"
+            echo "AERA_RELEASE_VERSION=${version:-unknown}"
           } >> "$GITHUB_ENV"
           df -h "$SRC_DIR"
 
@@ -285,7 +285,7 @@ jobs:
           {
             if [ -n "$RELEASE_NOTE" ]; then printf '%s\n\n' "$RELEASE_NOTE"; fi
             cat <<EOF
-          ## AERA ${AERA_VERSION} for ${codename}
+          ## AERA ${AERA_RELEASE_VERSION} for ${codename}
 
           Unofficial automated build. Test it before relying on it.
 
@@ -315,7 +315,7 @@ jobs:
           {
             echo "CODENAME=$codename"
             echo "RELEASE_TAG=$tag"
-            echo "RELEASE_TITLE=AERA ${AERA_VERSION} | ${codename} | ${built_at}"
+            echo "RELEASE_TITLE=AERA ${AERA_RELEASE_VERSION} | ${codename} | ${built_at}"
           } >> "$GITHUB_ENV"
           cat "$NOTES_FILE" >> "$GITHUB_STEP_SUMMARY"
 
