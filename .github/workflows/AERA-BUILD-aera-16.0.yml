@@ -9,6 +9,11 @@ on:
 
   workflow_dispatch:
     inputs:
+      SYNC_URL:
+        description: AERA manifest repository URL
+        required: true
+        type: string
+        default: https://github.com/AERA-Recovery/android_manifest.git
       MANIFEST_BRANCH:
         description: AERA manifest branch
         required: true
@@ -59,6 +64,11 @@ on:
         required: true
         type: string
         default: "30"
+      JAVA_VERSION:
+        description: OpenJDK version (Zulu distribution)
+        required: true
+        type: string
+        default: "11"
       PUBLISH_RELEASE:
         description: Publish a GitHub release (otherwise upload a workflow artifact)
         required: true
@@ -84,21 +94,25 @@ jobs:
         shell: bash
     env:
       DEBIAN_FRONTEND: noninteractive
+      SYNC_URL: ${{ inputs.SYNC_URL }}
       MANIFEST_BRANCH: ${{ inputs.MANIFEST_BRANCH }}
       DEVICE_TREE_URL: ${{ inputs.DEVICE_TREE_URL }}
       DEVICE_TREE_BRANCH: ${{ inputs.DEVICE_TREE_BRANCH }}
       DEVICE_PATH: ${{ inputs.DEVICE_PATH }}
       LUNCH_PRODUCT: ${{ inputs.LUNCH_PRODUCT }}
-      BUILD_TYPE: ${{ inputs.BUILD_TYPE }}
+      LUNCH_COMBO: ${{ inputs.LUNCH_PRODUCT }}-${{ inputs.BUILD_TYPE }}
       BUILD_TARGET: ${{ inputs.BUILD_TARGET }}
       SWAP_SIZE_GB: ${{ inputs.SWAP_SIZE_GB }}
+      JAVA_VERSION: ${{ inputs.JAVA_VERSION }}
       RELEASE_NOTE: ${{ inputs.RELEASE_NOTE }}
 
     steps:
-      - name: Prepare runner
+      - name: Cleanup
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Initialize workspace
         run: |
           set -euo pipefail
-          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
           [[ "$SWAP_SIZE_GB" =~ ^[0-9]+$ ]] || { echo "::error::SWAP_SIZE_GB must be a whole number"; exit 1; }
           [[ "$LUNCH_PRODUCT" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "::error::LUNCH_PRODUCT contains invalid characters"; exit 1; }
@@ -106,96 +120,88 @@ jobs:
             /* | *..*) echo "::error::DEVICE_PATH must be a relative path"; exit 1 ;;
           esac
 
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
-            /usr/local/share/chromium /usr/local/share/boost /opt/az /opt/microsoft \
-            /usr/lib/google-cloud-sdk
-          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          src="$GITHUB_WORKSPACE/workspace/$MANIFEST_BRANCH"
+          mkdir -p "$src"
 
-          sudo swapoff -a
-          sudo rm -f /mnt/swapfile
+          cat > "$RUNNER_TEMP/resources.sh" <<'EOF'
+          echo "========== ${1^^} RESOURCE DIAGNOSTICS =========="
 
-          free_gb() { df -BG --output=avail "$1" | awk 'NR==2 {gsub(/G/, ""); print $1}'; }
-          dev_of() { stat -c %d "$1"; }
+          echo "CPU cores available:"
+          nproc
 
-          # Build on the roomiest filesystem; swap goes on the other one when it fits.
-          big="$RUNNER_WORKSPACE"
-          small="$big"
-          if mountpoint -q /mnt && [ "$(dev_of /mnt)" != "$(dev_of "$big")" ]; then
-            small=/mnt
-            if [ "$(free_gb /mnt)" -gt "$(free_gb "$big")" ]; then
-              big=/mnt
-              small="$RUNNER_WORKSPACE"
-            fi
-          fi
+          echo "CPU cores installed:"
+          nproc --all
 
-          swap_fs="$small"
-          [ "$(free_gb "$swap_fs")" -ge $((SWAP_SIZE_GB + 2)) ] || swap_fs="$big"
-
-          if [ "$SWAP_SIZE_GB" -gt 0 ]; then
-            if [ "$(free_gb "$swap_fs")" -lt $((SWAP_SIZE_GB + 2)) ]; then
-              echo "::error::Insufficient disk space for ${SWAP_SIZE_GB}GB swap."
-              df -h "$big" "$swap_fs"
-              exit 1
-            fi
-          fi
-
-          sudo install -d -o "$(id -u)" -g "$(id -g)" "$big/aera"
-          echo "SRC_DIR=$big/aera" >> "$GITHUB_ENV"
-
-          if [ "$SWAP_SIZE_GB" -gt 0 ]; then
-            sudo fallocate -l "${SWAP_SIZE_GB}G" "$swap_fs/aera.swap"
-            sudo chmod 600 "$swap_fs/aera.swap"
-            sudo mkswap "$swap_fs/aera.swap" > /dev/null
-            sudo swapon "$swap_fs/aera.swap"
-          fi
-
-          swapon --show
+          echo "Memory:"
           free -h
-          df -h "$big" "$swap_fs"
 
-      - name: Install build dependencies
-        env:
-          ACTOR_ID: ${{ github.actor_id }}
+          echo "Swap:"
+          swapon --show
+
+          echo "Disk:"
+          df -h
+
+          for f in memory.events memory.peak; do
+            echo "Cgroup $f:"
+            if [ -f "/sys/fs/cgroup/$f" ]; then
+              cat "/sys/fs/cgroup/$f"
+            else
+              echo "$f unavailable"
+            fi
+          done
+
+          echo "Kernel OOM messages:"
+          sudo dmesg -T 2>/dev/null | grep -iE 'oom|out of memory|killed process' | tail -30 || true
+
+          echo "===================================================="
+          EOF
+
+          {
+            echo "JOB_START=$(date +%s)"
+            echo "SRC_DIR=$src"
+            echo "RESOURCES_SH=$RUNNER_TEMP/resources.sh"
+            echo "RELEASE_DIR=$RUNNER_TEMP/release"
+            echo "NOTES_FILE=$RUNNER_TEMP/notes.md"
+            echo "BUILD_LOG=$RUNNER_TEMP/build.log"
+            echo "BUILD_MARK=$RUNNER_TEMP/build.start"
+          } >> "$GITHUB_ENV"
+
+      - name: Install dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential cpio curl flex g++-multilib gcc-multilib git gnupg gperf \
-            lib32ncurses-dev lib32z1-dev libc6-dev-i386 libelf-dev libncurses-dev libssl-dev \
-            libxml2-utils lz4 python-is-python3 python3 rsync unzip xsltproc zip zlib1g-dev
+          sudo apt-get update
 
-          mkdir -p "$HOME/bin"
-          curl -fsSL --retry 5 --retry-all-errors \
-            https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
-          chmod +x "$HOME/bin/repo"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y \
+            git aria2 ccache python3 python-is-python3 bc bison build-essential \
+            curl flex g++-multilib gcc-multilib gnupg gperf imagemagick \
+            lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool \
+            libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
+            lzop pngcrush rsync schedtool squashfs-tools xsltproc zip \
+            zlib1g-dev unzip openssh-server tmux
 
-          git config --global user.name "$GITHUB_ACTOR"
-          git config --global user.email "${ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
-          git config --global color.ui true
+          sudo curl --create-dirs -fsSL --retry 5 --retry-all-errors \
+            -o /usr/local/bin/repo \
+            https://storage.googleapis.com/git-repo-downloads/repo
+
+          sudo chmod a+rx /usr/local/bin/repo
+
+          repo --version
+
+      - name: Install OpenJDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: ${{ env.JAVA_VERSION }}
 
       # Device trees are not part of AERA's common manifest; clone the selected tree separately.
       - name: Sync AERA source
         run: |
           set -euo pipefail
-          export PATH="$HOME/bin:$PATH"
           cd "$SRC_DIR"
           t0=$(date +%s)
 
-          repo init -u https://github.com/AERA-Recovery/android_manifest.git \
-            -b "$MANIFEST_BRANCH"
-
-          ok=0
-          for attempt in 1 2 3; do
-            if repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags; then
-              ok=1
-              break
-            fi
-            echo "::warning::repo sync failed (attempt $attempt of 3)"
-            sleep $((attempt * 30))
-          done
-          [ "$ok" -eq 1 ] || { echo "::error::repo sync failed"; exit 1; }
+          repo init --depth=1 -u "$SYNC_URL" -b "$MANIFEST_BRANCH"
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j"$(nproc)"
 
           version="$(sed -nE 's/^[[:space:]]*AERA_INTERNAL_RELEASE[[:space:]]*:?=[[:space:]]*//p' bootable/recovery/aera_build.mk | head -n1)"
           {
@@ -220,110 +226,48 @@ jobs:
             echo "DT_SHA=$(git -C "$DEVICE_PATH" rev-parse HEAD)"
           } >> "$GITHUB_ENV"
 
+      - name: Set Swap Space
+        if: ${{ env.SWAP_SIZE_GB != '0' }}
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: ${{ env.SWAP_SIZE_GB }}
+
       - name: Show system resources before build
-        run: |
-          set -euo pipefail
-
-          echo "========== PRE-BUILD RESOURCE DIAGNOSTICS =========="
-
-          echo "CPU cores available:"
-          nproc
-
-          echo "CPU cores installed:"
-          nproc --all
-
-          echo "Memory:"
-          free -h
-
-          echo "Swap:"
-          swapon --show
-
-          echo "Disk:"
-          df -h
-
-          echo "Cgroup memory events:"
-          if [ -f /sys/fs/cgroup/memory.events ]; then
-            cat /sys/fs/cgroup/memory.events
-          else
-            echo "memory.events unavailable"
-          fi
-
-          echo "===================================================="
+        run: bash "$RESOURCES_SH" pre-build
 
       - name: Build AERA Recovery
         run: |
-          set -o pipefail
-          export PATH="$HOME/bin:$PATH"
           cd "$SRC_DIR"
-          combo="${LUNCH_PRODUCT}-${BUILD_TYPE}"
-          export AERA_BUILD_DEVICE="${DEVICE_PATH##*/}"
-          export ALLOW_MISSING_DEPENDENCIES=true
 
           set +e
           source build/envsetup.sh
-          lunch "$combo"
-          rc=$?
+          export ALLOW_MISSING_DEPENDENCIES=true
           set -e
-          [ "$rc" -eq 0 ] || { echo "::error::lunch $combo failed"; exit 1; }
+
+          lunch "$LUNCH_COMBO" || { echo "::error::lunch $LUNCH_COMBO failed"; exit 1; }
           echo "PRODUCT_OUT=$OUT" >> "$GITHUB_ENV"
 
-          touch "$RUNNER_TEMP/build.start"
+          touch "$BUILD_MARK"
           t0=$(date +%s)
 
-          JOBS="$(nproc --all)"
-          echo "Using $JOBS parallel build jobs."
-
-          mka adbd "$BUILD_TARGET" -j"$JOBS" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          if ! mka adbd "$BUILD_TARGET" -j"$(nproc --all)" 2>&1 | tee "$BUILD_LOG"; then
+            echo "::error::Build failed for $LUNCH_COMBO"
+            exit 1
+          fi
 
           echo "BUILD_SECONDS=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"
 
       - name: Show system resources after build
         if: always()
-        run: |
-          echo "========== POST-BUILD RESOURCE DIAGNOSTICS =========="
-
-          echo "CPU cores available:"
-          nproc
-
-          echo "CPU cores installed:"
-          nproc --all
-
-          echo "Memory:"
-          free -h
-
-          echo "Swap:"
-          swapon --show
-
-          echo "Disk:"
-          df -h
-
-          echo "Cgroup memory events:"
-          if [ -f /sys/fs/cgroup/memory.events ]; then
-            cat /sys/fs/cgroup/memory.events
-          else
-            echo "memory.events unavailable"
-          fi
-
-          echo "Cgroup memory peak:"
-          if [ -f /sys/fs/cgroup/memory.peak ]; then
-            cat /sys/fs/cgroup/memory.peak
-          else
-            echo "memory.peak unavailable"
-          fi
-
-          echo "Kernel OOM messages:"
-          sudo dmesg -T 2>/dev/null | grep -iE 'oom|out of memory|killed process' | tail -30 || true
-
-          echo "====================================================="
+        run: bash "$RESOURCES_SH" post-build
 
       - name: Collect outputs and release notes
         run: |
           set -euo pipefail
-          rel="$RUNNER_TEMP/release"
-          mkdir -p "$rel"
+          mkdir -p "$RELEASE_DIR"
           find "$PRODUCT_OUT" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.img' \) \
-            -newer "$RUNNER_TEMP/build.start" -exec cp -t "$rel" {} +
-          [ -n "$(ls -A "$rel")" ] || { echo "::error::No build outputs found in $PRODUCT_OUT"; exit 1; }
+            -newer "$BUILD_MARK" -exec cp -t "$RELEASE_DIR" {} +
+          [ -n "$(ls -A "$RELEASE_DIR")" ] || { echo "::error::No build outputs found in $PRODUCT_OUT"; exit 1; }
 
           fmt() { printf '%dh %02dm %02ds' $(($1 / 3600)) $(($1 % 3600 / 60)) $(($1 % 60)); }
           total=$(( $(date +%s) - JOB_START ))
@@ -334,7 +278,7 @@ jobs:
           if [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then tag="${tag}-${GITHUB_RUN_ATTEMPT}"; fi
 
           files=""
-          for f in "$rel"/*; do
+          for f in "$RELEASE_DIR"/*; do
             files+="| $(basename "$f") | $(du -h "$f" | cut -f1) | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"$'\n'
           done
 
@@ -354,7 +298,7 @@ jobs:
           | Total workflow time | $(fmt "$total") |
           | Manifest | ${MANIFEST_BRANCH} (\`${MANIFEST_SHA}\`) |
           | Recovery source | \`${RECOVERY_SHA}\` |
-          | Lunch | \`${LUNCH_PRODUCT}-${BUILD_TYPE}\` |
+          | Lunch | \`${LUNCH_COMBO}\` |
           | Target | \`mka adbd ${BUILD_TARGET}\` |
           | Workflow run | [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |
 
@@ -366,14 +310,14 @@ jobs:
           |---|---|---|
           ${files}
           EOF
-          } > "$RUNNER_TEMP/notes.md"
+          } > "$NOTES_FILE"
 
           {
             echo "CODENAME=$codename"
             echo "RELEASE_TAG=$tag"
             echo "RELEASE_TITLE=AERA ${AERA_VERSION} | ${codename} | ${built_at}"
           } >> "$GITHUB_ENV"
-          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$NOTES_FILE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish release
         if: ${{ inputs.PUBLISH_RELEASE }}
@@ -382,9 +326,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
+          gh release create "$RELEASE_TAG" "$RELEASE_DIR"/* \
             --title "$RELEASE_TITLE" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
+            --notes-file "$NOTES_FILE" \
             --target "$GITHUB_SHA"
 
       - name: Upload build output
@@ -392,7 +336,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: aera-${{ env.CODENAME }}-${{ github.run_number }}
-          path: ${{ runner.temp }}/release/*
+          path: ${{ env.RELEASE_DIR }}/*
           if-no-files-found: error
 
       - name: Upload build log
@@ -400,6 +344,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: build-log-${{ github.run_number }}
-          path: ${{ runner.temp }}/build.log
+          path: ${{ env.BUILD_LOG }}
           if-no-files-found: ignore
           retention-days: 7
