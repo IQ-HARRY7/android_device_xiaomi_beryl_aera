@@ -3,7 +3,7 @@
 
 FDEVICE="beryl"
 
-AERA_get_target_device() {
+aera_get_target_device() {
     local chkdev=""
 
     if [ -n "$ZSH_VERSION" ]; then
