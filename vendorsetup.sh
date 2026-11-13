@@ -74,7 +74,8 @@ if [ "$1" = "$FDEVICE" -o "$AERA_BUILD_DEVICE" = "$FDEVICE" ]; then
     # patchelf 
     export AERA_USE_PATCHELF_BINARY=1
     
-    
+    # prevent automated reboot when flashing AERA.zip
+    export AERA_INSTALLER_DISABLE_AUTOREBOOT=1
     
     # to fix CANNOT LINK EXECUTIVES & Keystore2 related issues in "Android 16" (ONLY!)
     export AERA_ADD_API_V36_PREBUILTS=2
