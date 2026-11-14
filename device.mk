@@ -34,7 +34,7 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/developer_gsi_keys.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/generic_ramdisk.mk)
 
 # Hidl Service
- PRODUCT_ENFORCE_VINTF_MANIFEST := true
+PRODUCT_ENFORCE_VINTF_MANIFEST := true
 
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += $(DEVICE_PATH)
@@ -69,7 +69,6 @@ PRODUCT_PACKAGES += \
     libmtk_bsg
 
 # Recovery basics
-
 PRODUCT_PACKAGES += \
     recovery \
     init \
@@ -101,7 +100,9 @@ PRODUCT_PACKAGES += \
     tune2fs.vendor_ramdisk
 
 PRODUCT_PACKAGES += \
-    fstab.mt6855.vendor_ramdisk
+    fstab.mt6855.vendor_ramdisk \
+    android.hardware.security.rkp-V3-ndk \
+    libcppcose_rkp
 
 # Drm
 PRODUCT_PACKAGES += \
